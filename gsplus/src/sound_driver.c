@@ -20,6 +20,11 @@
 #ifdef SDL_AUDIO
 # include "protos_sdl.h"
 #endif
+#ifdef LIBRETRO_AUDIO
+/* Implemented by the libretro frontend (gsplus/src/libretro/libretro.c). */
+void libretro_snd_init(word32 *shmaddr);
+int libretro_send_audio(byte *ptr, int size);
+#endif
 
 #if defined(__linux__) || defined(OSS)
 # include <sys/soundcard.h>
@@ -99,11 +104,18 @@ snddrv_init()
 #ifdef SDL_AUDIO
 	use_shm = 0;			// SDL audio runs in-process, never forks
 #endif
+#ifdef LIBRETRO_AUDIO
+	use_shm = 0;			// libretro audio is pulled per-frame, never forks
+#endif
 	if(!use_shm) {
 		/* windows and mac, and Linux Pulse Audio */
 		shmaddr = malloc(size);
 		memset(shmaddr, 0, size);
 		g_sound_shm_addr = shmaddr;
+#ifdef LIBRETRO_AUDIO
+		libretro_snd_init(shmaddr);
+		return;
+#endif
 #if defined(MAC)
 		macsnd_init();
 		return;
@@ -287,8 +299,9 @@ snddrv_send_sound(int real_samps, int size)
 	//					(real_samps << 30) + size);
 
 	call_playit = 0;
-#if defined(MAC) || defined(_WIN32) || defined(SDL_AUDIO)
-	call_playit = 1;			// In-process audio: mac/windows/SDL
+#if defined(MAC) || defined(_WIN32) || defined(SDL_AUDIO) || \
+						defined(LIBRETRO_AUDIO)
+	call_playit = 1;			// In-process audio: mac/windows/SDL/libretro
 #endif
 	if(call_playit || g_pulse_audio) {
 		child_sound_playit(tmp);
@@ -418,7 +431,9 @@ reliable_zero_write(int amt)
 int
 child_send_samples(byte *ptr, int size)
 {
-#ifdef SDL_AUDIO
+#ifdef LIBRETRO_AUDIO
+	return libretro_send_audio(ptr, size);
+#elif defined(SDL_AUDIO)
 	return sdl_send_audio(ptr, size);
 #elif defined(_WIN32)
 	return win32_send_audio(ptr, size);

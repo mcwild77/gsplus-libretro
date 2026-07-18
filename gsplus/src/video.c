@@ -541,7 +541,7 @@ video_init_kimage(Kimage *kimage_ptr, int width, int height,
 		screen_width = width;
 	}
 	if(screen_height < height) {
-		screen_width = height;
+		screen_height = height;
 	}
 	x_width = width;
 	x_height = height;

@@ -1087,6 +1087,13 @@ setup_zip_speeds()
 
 word32 g_cycs_end_16ms = 0;
 
+// When set, run_16ms() skips its wall-clock micro_sleep() so an external frame
+//  pacer (the libretro frontend's retro_run(), called once per frame by
+//  RetroArch) owns the timing.  Runtime flag, not an #ifdef, so every target
+//  compiles the identical code path; it defaults to 0, leaving the SDL/native
+//  builds provably unchanged.
+int g_micro_sleep_disable = 0;
+
 int
 run_16ms()
 {
@@ -1114,8 +1121,11 @@ run_16ms()
 	dtime_end = get_dtime();
 	g_dtime_in_run_16ms += (dtime_end - dtime_start);
 
-	// If we are ahead, then do the sleep now
-	micro_sleep(g_dtime_sleep);
+	// If we are ahead, then do the sleep now (unless an external frame pacer
+	//  owns the timing -- see g_micro_sleep_disable).
+	if(!g_micro_sleep_disable) {
+		micro_sleep(g_dtime_sleep);
+	}
 	dtime_end2 = get_dtime();
 	//printf("Did sleep for %f, dtime passed:%f\n", g_dtime_sleep,
 	//					dtime_end2 - dtime_end);
