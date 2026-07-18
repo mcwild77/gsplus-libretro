@@ -1,0 +1,56 @@
+# ============================================================================
+#  Makefile.common -- shared source & include list for the GSplus libretro core
+# ============================================================================
+#
+#  Included by Makefile.libretro. Kept separate (vice-libretro / buildbot
+#  convention) so the platform-specific flag logic and the source list evolve
+#  independently. CORE_DIR is set by the includer (the repo root).
+#
+#  SOURCES_C is the CMake GSPLUS_CORE_SOURCES list (the platform-independent
+#  KEGS core -- see gsplus/src/CMakeLists.txt) plus the libretro frontend. All
+#  SDL / macOS / Windows frontend files (sdl_driver.c, sdl_snd_driver.c,
+#  png_write.c, sdl_mac_menu.m, AppDelegate.swift, ...) are deliberately
+#  excluded: the libretro frontend replaces them.
+# ----------------------------------------------------------------------------
+
+GSPLUS_SRC := $(CORE_DIR)/gsplus/src
+LIBRETRO_DIR := $(GSPLUS_SRC)/libretro
+
+# libretro.h is vendored into gsplus/src/libretro/ so the build never depends on
+# the (gitignored) claudedocs/reference tree.
+INCFLAGS += \
+	-I$(GSPLUS_SRC) \
+	-I$(LIBRETRO_DIR)
+
+SOURCES_C := \
+	$(LIBRETRO_DIR)/libretro.c \
+	$(GSPLUS_SRC)/adb.c \
+	$(GSPLUS_SRC)/engine_c.c \
+	$(GSPLUS_SRC)/clock.c \
+	$(GSPLUS_SRC)/config.c \
+	$(GSPLUS_SRC)/debugger.c \
+	$(GSPLUS_SRC)/scc.c \
+	$(GSPLUS_SRC)/scc_socket_driver.c \
+	$(GSPLUS_SRC)/scc_windriver.c \
+	$(GSPLUS_SRC)/scc_unixdriver.c \
+	$(GSPLUS_SRC)/iwm.c \
+	$(GSPLUS_SRC)/joystick_driver.c \
+	$(GSPLUS_SRC)/moremem.c \
+	$(GSPLUS_SRC)/paddles.c \
+	$(GSPLUS_SRC)/mockingboard.c \
+	$(GSPLUS_SRC)/sim65816.c \
+	$(GSPLUS_SRC)/smartport.c \
+	$(GSPLUS_SRC)/doc.c \
+	$(GSPLUS_SRC)/sound.c \
+	$(GSPLUS_SRC)/sound_driver.c \
+	$(GSPLUS_SRC)/woz.c \
+	$(GSPLUS_SRC)/unshk.c \
+	$(GSPLUS_SRC)/undeflate.c \
+	$(GSPLUS_SRC)/dynapro.c \
+	$(GSPLUS_SRC)/dyna_type.c \
+	$(GSPLUS_SRC)/dyna_filt.c \
+	$(GSPLUS_SRC)/dyna_validate.c \
+	$(GSPLUS_SRC)/applesingle.c \
+	$(GSPLUS_SRC)/video.c \
+	$(GSPLUS_SRC)/voc.c \
+	$(GSPLUS_SRC)/compile_time.c

@@ -1,12 +1,22 @@
 *.o
 
+# macOS
+.DS_Store
+
 # Build / runtime artifacts
 gsplus/GSplus.app/
 gsplus/src/build/
 config.kegs
 gsplus_screenshot_*.png
 
+# libretro core build outputs
+gsplus_libretro.dylib
+gsplus_libretro.so
+gsplus_libretro.dll
+
 # Local Claude Code tooling
 .agents/
 skills-lock.json
+claudedocs/
+CLAUDE.local.md
 

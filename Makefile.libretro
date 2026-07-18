@@ -1,0 +1,104 @@
+# ============================================================================
+#  Makefile.libretro -- GSplus libretro (RetroArch) core
+# ============================================================================
+#
+#  Builds gsplus_libretro.{dylib,so,dll}: the platform-independent KEGS core
+#  plus the libretro frontend (gsplus/src/libretro/libretro.c). Runs ALONGSIDE
+#  the CMake SDL3 build and never touches it -- the two shared core files that
+#  later phases modify (sound_driver.c, sim65816.c) stay inert for non-libretro
+#  builds.
+#
+#  Usage (from the repo root):
+#      make -f Makefile.libretro            # native build for this host
+#      make -f Makefile.libretro clean
+#      make -f Makefile.libretro platform=unix
+#
+#  Layout follows the libretro buildbot convention: this file owns platform +
+#  flag selection; Makefile.common owns the source/include list.
+# ----------------------------------------------------------------------------
+
+TARGET_NAME := gsplus
+CORE_DIR    := .
+
+# ----------------------------------------------------------------------------
+#  Platform detection (default = this host).
+# ----------------------------------------------------------------------------
+ifeq ($(platform),)
+   platform = unix
+   ifeq ($(shell uname -s),)
+      platform = win
+   else ifneq ($(findstring MINGW,$(shell uname -s)),)
+      platform = win
+   else ifneq ($(findstring Darwin,$(shell uname -s)),)
+      platform = osx
+   else ifneq ($(findstring win,$(shell uname -s)),)
+      platform = win
+   endif
+endif
+
+# ----------------------------------------------------------------------------
+#  Per-platform target name and link flags.
+#
+#  macOS uses -dynamiclib (its ld has no --version-script; symbol hiding is not
+#  required for RetroArch to dlsym the retro_* entry points). Linux/Windows use
+#  the version script (link.T) so only retro_* is exported, plus --no-undefined
+#  so any unresolved core symbol fails the build loudly rather than at load.
+# ----------------------------------------------------------------------------
+fpic := -fPIC
+LINK_T := $(CORE_DIR)/gsplus/src/libretro/link.T
+
+ifeq ($(platform), osx)
+   TARGET := $(TARGET_NAME)_libretro.dylib
+   SHARED := -dynamiclib
+else ifeq ($(platform), win)
+   TARGET := $(TARGET_NAME)_libretro.dll
+   SHARED := -shared -static-libgcc -Wl,--version-script=$(LINK_T) -Wl,--no-undefined
+   LIBS   += -lws2_32 -lwinmm
+else
+   # unix (Linux / *BSD)
+   TARGET := $(TARGET_NAME)_libretro.so
+   SHARED := -shared -Wl,--version-script=$(LINK_T) -Wl,--no-undefined
+   LIBS   += -lm
+endif
+
+# ----------------------------------------------------------------------------
+#  Compiler flags.
+#
+#   -D__LIBRETRO__   selects the libretro frontend paths
+#   -DLIBRETRO_AUDIO routes audio through the libretro backend (Phase 1 seam)
+#   -DSDL_INPUT      compiles the native joystick backends out of
+#                    joystick_driver.c so the frontend supplies joystick_*
+#                    (documented misnomer: reused, not SDL-specific)
+#  Deliberately NO -DMAC and NO -DSDL_AUDIO.
+# ----------------------------------------------------------------------------
+DEFINES := -D__LIBRETRO__ -DLIBRETRO_AUDIO -DSDL_INPUT
+
+ifeq ($(DEBUG), 1)
+   OPTFLAGS := -O0 -g
+else
+   OPTFLAGS := -O2
+endif
+
+CC ?= cc
+
+include $(CORE_DIR)/Makefile.common
+
+CFLAGS += $(OPTFLAGS) -Wall $(fpic) $(DEFINES) $(INCFLAGS)
+
+OBJECTS := $(SOURCES_C:.c=.o)
+
+# ----------------------------------------------------------------------------
+#  Rules
+# ----------------------------------------------------------------------------
+all: $(TARGET)
+
+$(TARGET): $(OBJECTS)
+	$(CC) $(fpic) $(SHARED) -o $@ $(OBJECTS) $(LIBS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJECTS) $(TARGET)
+
+.PHONY: all clean
