@@ -127,7 +127,12 @@ static int      g_lr_kegs_inited;    /* KEGS globals can only init once/process 
 
 enum { LR_ASPECT_43 = 0, LR_ASPECT_PP };     /* 4:3 vs square pixels */
 enum { LR_DPAD_ARROWS = 0, LR_DPAD_JOYSTICK };
-enum { LR_MOUSE_RELATIVE = 0, LR_MOUSE_DISABLED };
+/* Mouse input source. Auto reads every source at once (the "painless" default);
+ * the explicit modes lock to one. Touch is trackpad-relative (plant a finger and
+ * drag, the cursor follows) rather than jumping to the touched pixel -- direct
+ * absolute touch is offered separately for those who want it. */
+enum { LR_MOUSE_AUTO = 0, LR_MOUSE_TOUCH, LR_MOUSE_TOUCH_ABS,
+       LR_MOUSE_RELATIVE, LR_MOUSE_RIGHTSTICK, LR_MOUSE_DISABLED };
 /* Border handling: draw the IIgs border, blacken it (keep 4:3 frame), or crop
  * it away (hand RetroArch just the 640x400 picture). */
 enum { LR_BORDER_SHOW = 0, LR_BORDER_BLACK, LR_BORDER_CROP };
@@ -135,7 +140,8 @@ enum { LR_BORDER_SHOW = 0, LR_BORDER_BLACK, LR_BORDER_CROP };
 static int g_opt_audio    = 1;               /* g_audio_enable mirror */
 static int g_opt_aspect   = LR_ASPECT_43;
 static int g_opt_dpad     = LR_DPAD_ARROWS;
-static int g_opt_mouse    = LR_MOUSE_RELATIVE;
+static int g_opt_mouse    = LR_MOUSE_AUTO;
+static int g_opt_mouse_speed = 100;          /* touch/stick sensitivity, percent */
 static int g_opt_border   = LR_BORDER_SHOW;  /* how to treat the IIgs border */
 
 /* Boot slot -> BRAM $28 value: 0 = "Default" sentinel meaning leave the ROM's
@@ -154,6 +160,7 @@ static int g_boot_slot_done  = 0;            /* already applied for this value *
 #define LR_KEY_ASPECT    "gsplus_aspect"
 #define LR_KEY_DPAD      "gsplus_dpad_mode"
 #define LR_KEY_MOUSE     "gsplus_mouse_mode"
+#define LR_KEY_MOUSESPD  "gsplus_mouse_speed"
 #define LR_KEY_BOOTSLOT  "gsplus_boot_slot"
 #define LR_KEY_BORDER    "gsplus_border"
 
@@ -199,10 +206,28 @@ static const struct retro_core_option_v2_definition g_option_defs[] = {
    {
       LR_KEY_MOUSE,
       "Mouse", NULL,
-      "Relative mode maps the RetroPad mouse device to the IIgs mouse.",
+      "How to drive the one-button IIgs mouse. Auto reads touch, physical mouse "
+      "and the right stick at once. Touch is trackpad-style (drag to move); "
+      "Touch (Direct) jumps to the touched point. R1 always clicks.",
       NULL, NULL,
-      { { "relative", "Relative" }, { "disabled", NULL }, { NULL, NULL } },
-      "relative"
+      { { "auto",        "Auto (all sources)" },
+        { "touch",       "Touch (Trackpad)" },
+        { "touch_abs",   "Touch (Direct)" },
+        { "relative",    "Physical Mouse" },
+        { "right_stick", "Right Analog Stick" },
+        { "disabled",    NULL },
+        { NULL, NULL } },
+      "auto"
+   },
+   {
+      LR_KEY_MOUSESPD,
+      "Mouse Speed", NULL,
+      "Cursor sensitivity for touch-drag and the right analog stick.",
+      NULL, NULL,
+      { { "25",  "25%" },  { "50",  "50%" },  { "75",  "75%" },
+        { "100", "100%" }, { "150", "150%" }, { "200", "200%" },
+        { "300", "300%" }, { NULL, NULL } },
+      "100"
    },
    {
       LR_KEY_BOOTSLOT,
@@ -316,8 +341,17 @@ static int lr_apply_options(void)
    g_opt_dpad = (v && !strcmp(v, "joystick")) ? LR_DPAD_JOYSTICK : LR_DPAD_ARROWS;
 
    v = lr_get_option(LR_KEY_MOUSE);
-   g_opt_mouse = (v && !strcmp(v, "disabled")) ? LR_MOUSE_DISABLED
-                                               : LR_MOUSE_RELATIVE;
+   if      (v && !strcmp(v, "touch"))       g_opt_mouse = LR_MOUSE_TOUCH;
+   else if (v && !strcmp(v, "touch_abs"))   g_opt_mouse = LR_MOUSE_TOUCH_ABS;
+   else if (v && !strcmp(v, "relative"))    g_opt_mouse = LR_MOUSE_RELATIVE;
+   else if (v && !strcmp(v, "right_stick")) g_opt_mouse = LR_MOUSE_RIGHTSTICK;
+   else if (v && !strcmp(v, "disabled"))    g_opt_mouse = LR_MOUSE_DISABLED;
+   else                                     g_opt_mouse = LR_MOUSE_AUTO;
+
+   v = lr_get_option(LR_KEY_MOUSESPD);
+   g_opt_mouse_speed = v ? atoi(v) : 100;
+   if (g_opt_mouse_speed <= 0)
+      g_opt_mouse_speed = 100;
 
    v = lr_get_option(LR_KEY_ASPECT);
    new_aspect = (v && !strcmp(v, "pixel_perfect")) ? LR_ASPECT_PP
@@ -435,10 +469,17 @@ static char     g_disk_paths[LR_MAX_DISKS][LR_PATH_MAX];
 static unsigned g_disk_count;
 static unsigned g_disk_index;        /* image the tray will insert */
 static int      g_disk_ejected;      /* tray open? */
-static int      g_disk_slot = 7;     /* IIgs slot the set swaps through */
+static int      g_disk_slot = 7;     /* IIgs slot of the active tray image */
 static int      g_disk_drive;        /* drive 0 (== the user's "drive 1") */
 static char     g_disk_initial_path[LR_PATH_MAX];   /* frontend restore hint */
 static unsigned g_disk_initial_index;
+
+/* Optional per-entry slot/drive pinning parsed from an .m3u line's "|slot[,drive]"
+ * suffix (see lr_parse_disk_annotation). g_disk_slot_ann[i] == -1 means "no
+ * annotation": auto-guess the slot from image size and use drive 0, as before.
+ * g_disk_drive_ann[] holds a 0-based drive (the playlist syntax is 1-based). */
+static signed char g_disk_slot_ann[LR_MAX_DISKS];
+static signed char g_disk_drive_ann[LR_MAX_DISKS];
 
 /* Same slot mapping as drag-and-drop: 5.25" -> s6, 3.5" -> s5, else SmartPort. */
 static int lr_disk_slot_for(const char *path)
@@ -448,6 +489,22 @@ static int lr_disk_slot_for(const char *path)
       case 1:  return 6;
       case 2:  return 5;
       default: return 7;
+   }
+}
+
+/* Resolve where tray entry idx should mount: an explicit .m3u annotation if it
+ * has one, otherwise the size-guessed slot at drive 0. */
+static void lr_resolve_disk_target(unsigned idx, int *slot, int *drive)
+{
+   if (g_disk_slot_ann[idx] >= 0)
+   {
+      *slot  = g_disk_slot_ann[idx];
+      *drive = g_disk_drive_ann[idx];
+   }
+   else
+   {
+      *slot  = lr_disk_slot_for(g_disk_paths[idx]);
+      *drive = 0;
    }
 }
 
@@ -467,7 +524,7 @@ static bool RETRO_CALLCONV lr_disk_set_eject(bool ejected)
    }
    else if (g_disk_index < g_disk_count && g_disk_paths[g_disk_index][0])
    {
-      g_disk_slot = lr_disk_slot_for(g_disk_paths[g_disk_index]);
+      lr_resolve_disk_target(g_disk_index, &g_disk_slot, &g_disk_drive);
       cfg_maybe_insert_disk(g_disk_slot, g_disk_drive,
                             g_disk_paths[g_disk_index]);
    }
@@ -509,13 +566,20 @@ static bool RETRO_CALLCONV lr_disk_replace_image_index(unsigned index,
    {
       strncpy(g_disk_paths[index], info->path, LR_PATH_MAX - 1);
       g_disk_paths[index][LR_PATH_MAX - 1] = 0;
+      /* Frontend-supplied path carries no annotation: revert to auto-guess. */
+      g_disk_slot_ann[index]  = -1;
+      g_disk_drive_ann[index] = 0;
    }
    else
    {
       /* Remove this entry, shifting the rest down. */
       unsigned i;
       for (i = index; i + 1 < g_disk_count; i++)
+      {
          strcpy(g_disk_paths[i], g_disk_paths[i + 1]);
+         g_disk_slot_ann[i]  = g_disk_slot_ann[i + 1];
+         g_disk_drive_ann[i] = g_disk_drive_ann[i + 1];
+      }
       g_disk_count--;
       if (g_disk_index >= g_disk_count && g_disk_index)
          g_disk_index = g_disk_count ? g_disk_count - 1 : 0;
@@ -527,7 +591,9 @@ static bool RETRO_CALLCONV lr_disk_add_image_index(void)
 {
    if (g_disk_count >= LR_MAX_DISKS)
       return false;
-   g_disk_paths[g_disk_count][0] = 0;
+   g_disk_paths[g_disk_count][0]  = 0;
+   g_disk_slot_ann[g_disk_count]  = -1;
+   g_disk_drive_ann[g_disk_count] = 0;
    g_disk_count++;
    return true;
 }
@@ -610,13 +676,108 @@ static void lr_register_disk_control(void)
    }
 }
 
-static void lr_disk_add(const char *path)
+/* Append an image to the swap list. slot < 0 means "no annotation" (auto-guess
+ * the slot by size, drive 0); otherwise slot/drive pin where it mounts. */
+static void lr_disk_add(const char *path, int slot, int drive)
 {
    if (g_disk_count >= LR_MAX_DISKS || !path || !path[0])
       return;
    strncpy(g_disk_paths[g_disk_count], path, LR_PATH_MAX - 1);
    g_disk_paths[g_disk_count][LR_PATH_MAX - 1] = 0;
+   g_disk_slot_ann[g_disk_count]  = (signed char)(slot < 0 ? -1 : slot);
+   g_disk_drive_ann[g_disk_count] = (signed char)(slot < 0 ? 0  : drive);
    g_disk_count++;
+}
+
+/* Parse an optional "|slot[,drive]" suffix on an .m3u entry. The path portion
+ * (annotation stripped, trailing blanks trimmed) is written to path_out; on a
+ * valid suffix *slot is set to 5..7 and *drive to a 0-based drive, else *slot
+ * stays -1. Drive numbers in the playlist are 1-based (drive 1 = the first
+ * drive, matching how the IIgs presents them). A bare '|' that isn't followed
+ * by a valid annotation is left as part of the filename. Examples:
+ *   Boot.hdv|7,1   -> SmartPort slot 7, first unit
+ *   Data.hdv|7,2   -> SmartPort slot 7, second unit
+ *   Game.po|6      -> slot 6, drive 1 (drive defaults to 1) */
+static void lr_parse_disk_annotation(const char *line, char *path_out,
+      size_t path_sz, int *slot_out, int *drive_out)
+{
+   const char *bar = NULL, *p, *q;
+   char *end;
+   int slot, drive;
+   size_t n;
+
+   *slot_out  = -1;
+   *drive_out = 0;
+
+   for (p = line; *p; p++)          /* split on the LAST '|' */
+      if (*p == '|')
+         bar = p;
+
+   if (bar)
+   {
+      q = bar + 1;
+      while (*q == ' ' || *q == '\t') q++;
+      slot = (int)strtol(q, &end, 10);
+      if (end == q)                 /* '|' not followed by a number: path */
+         bar = NULL;
+      else
+      {
+         while (*end == ' ' || *end == '\t') end++;
+         drive = 1;
+         if (*end == ',')
+         {
+            const char *r = end + 1;
+            while (*r == ' ' || *r == '\t') r++;
+            drive = (int)strtol(r, &end, 10);
+            while (*end == ' ' || *end == '\t') end++;
+         }
+         if (*end == 0 && slot >= 5 && slot <= 7 && drive >= 1 &&
+             ((slot == 7 && drive <= MAX_C7_DISKS) ||
+              (slot <  7 && drive <= 2)))
+         {
+            *slot_out  = slot;
+            *drive_out = drive - 1;   /* 1-based playlist -> 0-based engine */
+         }
+         else                       /* suffix present but out of range */
+         {
+            log_cb(RETRO_LOG_WARN,
+                   "GSplus: ignoring invalid disk annotation \"%s\"\n", bar);
+            bar = NULL;
+         }
+      }
+   }
+
+   n = bar ? (size_t)(bar - line) : strlen(line);
+   while (n && (line[n - 1] == ' ' || line[n - 1] == '\t'))
+      n--;                          /* trim blanks before the '|' */
+   if (n >= path_sz)
+      n = path_sz - 1;
+   memcpy(path_out, line, n);
+   path_out[n] = 0;
+}
+
+/* Mount the initial disk set at load: pin every explicitly-annotated image to
+ * its slot/drive, then mount the active tray entry last so it wins its slot.
+ * Unannotated non-active entries are left to the disk-control tray, preserving
+ * classic single-drive swap behavior for plain playlists. */
+static void lr_mount_initial(void)
+{
+   unsigned i;
+
+   if (g_disk_count == 0 || !g_disk_paths[g_disk_index][0])
+      return;
+
+   for (i = 0; i < g_disk_count; i++)
+   {
+      int slot, drive;
+      if (i == g_disk_index || g_disk_slot_ann[i] < 0 || !g_disk_paths[i][0])
+         continue;
+      lr_resolve_disk_target(i, &slot, &drive);
+      cfg_maybe_insert_disk(slot, drive, g_disk_paths[i]);
+   }
+
+   lr_resolve_disk_target(g_disk_index, &g_disk_slot, &g_disk_drive);
+   cfg_maybe_insert_disk(g_disk_slot, g_disk_drive, g_disk_paths[g_disk_index]);
 }
 
 static int lr_has_ext(const char *path, const char *ext)
@@ -672,7 +833,9 @@ static void lr_populate_disks(const char *content_path)
       {
          while (fgets(line, sizeof(line), f))
          {
-            char full[LR_PATH_MAX];
+            char   full[LR_PATH_MAX];
+            char   entry[LR_PATH_MAX];
+            int    slot, drive;
             size_t n = strlen(line);
 
             while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' ||
@@ -681,19 +844,25 @@ static void lr_populate_disks(const char *content_path)
             if (!n || line[0] == '#')
                continue;   /* blank or #EXTM3U/comment */
 
-            if (line[0] == '/' || line[0] == '\\' ||
-                (n > 1 && line[1] == ':'))          /* absolute */
-               snprintf(full, sizeof(full), "%s", line);
+            /* Peel off an optional "|slot[,drive]" suffix, leaving the raw
+             * (possibly relative) path in entry[]. */
+            lr_parse_disk_annotation(line, entry, sizeof(entry), &slot, &drive);
+            if (!entry[0])
+               continue;
+
+            if (entry[0] == '/' || entry[0] == '\\' ||
+                (entry[1] == ':'))                   /* absolute */
+               snprintf(full, sizeof(full), "%s", entry);
             else
-               snprintf(full, sizeof(full), "%s%s", dir, line);
-            lr_disk_add(full);
+               snprintf(full, sizeof(full), "%s%s", dir, entry);
+            lr_disk_add(full, slot, drive);
          }
          fclose(f);
       }
    }
 
    if (g_disk_count == 0)
-      lr_disk_add(content_path);   /* single image, or unreadable .m3u */
+      lr_disk_add(content_path, -1, 0);   /* single image, or unreadable .m3u */
 
    /* Honor a frontend restore hint (last-used disk), matching by path. */
    if (g_disk_initial_path[0])
@@ -1094,8 +1263,9 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
    /* Build the disk-swap list from the content (expanding an .m3u playlist),
-    * register the disk-control interface, then mount the initial image into its
-    * guessed slot (5.25" -> s6, 3.5" -> s5, small/hard-drive images -> s7). */
+    * register the disk-control interface, then mount the initial set: images
+    * with a "|slot[,drive]" annotation are pinned to that slot/drive; anything
+    * else is auto-slotted (5.25" -> s6, 3.5" -> s5, hard-drive images -> s7). */
    if (info && info->path && info->path[0])
       lr_populate_disks(info->path);
    else
@@ -1106,12 +1276,7 @@ bool retro_load_game(const struct retro_game_info *info)
    }
    lr_register_disk_control();
 
-   if (g_disk_count > 0 && g_disk_paths[g_disk_index][0])
-   {
-      g_disk_slot = lr_disk_slot_for(g_disk_paths[g_disk_index]);
-      cfg_maybe_insert_disk(g_disk_slot, g_disk_drive,
-                            g_disk_paths[g_disk_index]);
-   }
+   lr_mount_initial();
 
    /* Now that the machine is up, read the initial option values (audio, dpad,
     * aspect, border, startup slot) and refresh the reported geometry. */
@@ -1327,26 +1492,205 @@ static void lr_poll_pad_keys(void)
    }
 }
 
-/* RETRO_DEVICE_MOUSE reports per-frame relative motion + button state; feed it
- * to the emulator in delta mode (buttons_valid | 0x1000), mirroring the SDL
- * mouse handler. Left -> IIgs button 0 (mask 1), right -> button 4. */
+/* ------------------------------------------------------------------ */
+/*  Mouse: touch, physical mouse, and right analog stick              */
+/* ------------------------------------------------------------------ */
+/* The IIgs mouse is a single-button device -- KEGS routes a mouse "right button"
+ * to a host emulation-speed toggle (adb.c), never to the guest, so button 0 is
+ * the only real click. R1 clicks in every mode; each source also carries its own
+ * native click (touch contact / a tap, the physical left button). Movement is
+ * fed as deltas in every mode except Touch (Direct), which reports an absolute
+ * position. Touch defaults to trackpad behaviour: plant a finger anywhere and
+ * the cursor follows the drag, rather than jumping to the touched pixel. */
+
 static int g_mouse_prev_mask;
+
+/* Right-stick axis (-0x8000..0x7fff) -> per-frame pixel delta, with a deadzone
+ * and a curve that stays gentle near center and accelerates toward the edge. */
+static int lr_stick_delta(int axis)
+{
+   const int deadzone = 0x2000;                 /* ~25% ignored */
+   int   sign = (axis < 0) ? -1 : 1;
+   int   mag  = (axis < 0) ? -axis : axis;
+   float norm, px;
+   if (mag <= deadzone)
+      return 0;
+   norm = (float)(mag - deadzone) / (float)(0x7fff - deadzone);   /* 0..1 */
+   if (norm > 1.0f)
+      norm = 1.0f;
+   px = norm * norm * 13.0f + norm * 2.0f;      /* ~0..15 px/frame */
+   return sign * (int)(px + 0.5f);
+}
+
+/* Apply the Mouse Speed percentage to a raw pixel delta. */
+static int lr_scale_speed(int d)
+{
+   return d * g_opt_mouse_speed / 100;
+}
+
+/* Trackpad-style touch state (Auto + Touch modes). */
+static int g_touch_active;              /* pointer was pressed last frame */
+static int g_touch_last_x, g_touch_last_y;   /* last pointer position (ptr units) */
+static int g_touch_acc_x, g_touch_acc_y;     /* sub-pixel residual (< 65534) */
+static int g_touch_frames;             /* frames the current touch has lasted */
+static int g_touch_moved;              /* accumulated |motion| during this touch */
+static int g_touch_click_hold;         /* frames left holding a synthesized tap */
+
+/* Direct-touch (absolute) tracking, in a2 coordinates. */
+static int g_mouse_abs_x = -1, g_mouse_abs_y = -1;
+
+/* Gather trackpad-drag motion from the pointer as a relative a2 delta, and
+ * report a synthesized "tap = click" via *click. */
+static void lr_touch_trackpad(int *dx, int *dy, int *click)
+{
+   int pressed = input_state_cb(0, RETRO_DEVICE_POINTER, 0,
+                                RETRO_DEVICE_ID_POINTER_PRESSED);
+   if (pressed)
+   {
+      int px = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+      int py = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+      if (g_touch_active)
+      {
+         int rdx = px - g_touch_last_x;
+         int rdy = py - g_touch_last_y;
+         /* Pointer coords span 65534 units across the picture; convert to a2
+          * pixels (scaled by Mouse Speed) with sub-pixel carry so slow drags
+          * still register. Use 64-bit intermediates: a fast flick makes the
+          * numerator exceed 32 bits. */
+         long long ax = (long long)rdx * A2_WINDOW_WIDTH  * g_opt_mouse_speed / 100
+                        + g_touch_acc_x;
+         long long ay = (long long)rdy * A2_WINDOW_HEIGHT * g_opt_mouse_speed / 100
+                        + g_touch_acc_y;
+         *dx = (int)(ax / 65534);
+         *dy = (int)(ay / 65534);
+         g_touch_acc_x = (int)(ax - (long long)*dx * 65534);
+         g_touch_acc_y = (int)(ay - (long long)*dy * 65534);
+         g_touch_moved += (rdx < 0 ? -rdx : rdx) + (rdy < 0 ? -rdy : rdy);
+      }
+      else
+      {
+         g_touch_acc_x = g_touch_acc_y = 0;
+         g_touch_moved = 0;
+         g_touch_frames = 0;
+      }
+      g_touch_last_x = px;
+      g_touch_last_y = py;
+      g_touch_frames++;
+      g_touch_active = 1;
+   }
+   else
+   {
+      /* Released: a brief, near-stationary touch is a tap -> synthesize a click
+       * held for a few frames so the guest registers a full press/release. */
+      if (g_touch_active && g_touch_frames <= 12 && g_touch_moved < 1200)
+         g_touch_click_hold = 3;
+      g_touch_active = 0;
+   }
+
+   if (g_touch_click_hold > 0)
+   {
+      *click = 1;
+      g_touch_click_hold--;
+   }
+}
+
+/* Map the pointer to an absolute a2 position (Touch (Direct) mode). Returns 1
+ * with the a2x/a2y outputs filled and pressed set when the screen is touched. */
+static int lr_touch_absolute(int *a2x, int *a2y, int *pressed_out)
+{
+   int px, py, ox, oy, ow, oh, ax, ay, aw, ah, bx, by, x, y;
+   int pressed = input_state_cb(0, RETRO_DEVICE_POINTER, 0,
+                                RETRO_DEVICE_ID_POINTER_PRESSED);
+   *pressed_out = pressed;
+   if (!pressed)
+      return 0;
+
+   px = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+   py = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+   lr_compute_view(&ox, &oy, &ow, &oh);         /* the rect handed to RetroArch */
+   if (!lr_active_rect(&ax, &ay, &aw, &ah) || aw <= 0 || ah <= 0)
+      return 0;
+
+   /* Pointer 0..65535 spans the visible rect; place it in buffer coords, then
+    * within the 640x400 active picture. */
+   bx = ox + (px + 0x7fff) * ow / 0xffff;
+   by = oy + (py + 0x7fff) * oh / 0xffff;
+   x  = (bx - ax) * A2_WINDOW_WIDTH  / aw;
+   y  = (by - ay) * A2_WINDOW_HEIGHT / ah;
+   if (x < 0) x = 0;
+   if (y < 0) y = 0;
+   if (x > A2_WINDOW_WIDTH  - 1) x = A2_WINDOW_WIDTH  - 1;
+   if (y > A2_WINDOW_HEIGHT - 1) y = A2_WINDOW_HEIGHT - 1;
+   *a2x = x;
+   *a2y = y;
+   return 1;
+}
 
 static void lr_poll_mouse(void)
 {
-   int dx, dy, mask;
+   int dx = 0, dy = 0, mask = 0;
+   int r1, want_touch, want_touch_abs, want_mouse, want_stick;
+
    if (!g_lr_kimage || !input_state_cb)
       return;
    if (g_opt_mouse == LR_MOUSE_DISABLED)
       return;
 
-   dx = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
-   dy = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
-   mask = 0;
-   if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT))
-      mask |= 1;
-   if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT))
-      mask |= 4;
+   r1 = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0,
+                       RETRO_DEVICE_ID_JOYPAD_R) ? 1 : 0;
+
+   want_touch     = (g_opt_mouse == LR_MOUSE_AUTO || g_opt_mouse == LR_MOUSE_TOUCH);
+   want_touch_abs = (g_opt_mouse == LR_MOUSE_TOUCH_ABS);
+   want_mouse     = (g_opt_mouse == LR_MOUSE_AUTO || g_opt_mouse == LR_MOUSE_RELATIVE);
+   want_stick     = (g_opt_mouse == LR_MOUSE_AUTO || g_opt_mouse == LR_MOUSE_RIGHTSTICK);
+
+   /* Direct absolute touch is its own mode: report a position, not deltas. */
+   if (want_touch_abs)
+   {
+      int a2x, a2y, pressed;
+      if (lr_touch_absolute(&a2x, &a2y, &pressed))
+      {
+         mask = (pressed || r1) ? 1 : 0;
+         if (a2x != g_mouse_abs_x || a2y != g_mouse_abs_y ||
+             mask != g_mouse_prev_mask)
+         {
+            /* buttons_valid without 0x1000 = absolute position. */
+            adb_update_mouse(g_lr_kimage, a2x, a2y, mask, 1 | 4);
+            g_mouse_abs_x = a2x;
+            g_mouse_abs_y = a2y;
+            g_mouse_prev_mask = mask;
+         }
+      }
+      return;
+   }
+
+   /* Relative sources sum into a single delta + button call. */
+   if (want_touch)
+   {
+      int tclick = 0;
+      lr_touch_trackpad(&dx, &dy, &tclick);
+      if (tclick)
+         mask |= 1;
+   }
+   if (want_mouse)
+   {
+      dx += input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
+      dy += input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_Y);
+      if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT))
+         mask |= 1;
+      if (input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_RIGHT))
+         mask |= 4;
+   }
+   if (want_stick)
+   {
+      dx += lr_scale_speed(lr_stick_delta(input_state_cb(0, RETRO_DEVICE_ANALOG,
+               RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X)));
+      dy += lr_scale_speed(lr_stick_delta(input_state_cb(0, RETRO_DEVICE_ANALOG,
+               RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y)));
+   }
+
+   if (r1)
+      mask |= 1;                          /* universal click */
 
    if (dx || dy || mask != g_mouse_prev_mask)
    {
@@ -1469,10 +1813,15 @@ static const struct retro_input_descriptor g_input_descriptors[] = {
    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START, "Return" },
    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,
         "On-Screen Keyboard" },
+   { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R, "Mouse Click" },
    { 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
         RETRO_DEVICE_ID_ANALOG_X, "Joystick X" },
    { 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
         RETRO_DEVICE_ID_ANALOG_Y, "Joystick Y" },
+   { 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT,
+        RETRO_DEVICE_ID_ANALOG_X, "Mouse X" },
+   { 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT,
+        RETRO_DEVICE_ID_ANALOG_Y, "Mouse Y" },
    { 0, 0, 0, 0, NULL }
 };
 

@@ -50,9 +50,11 @@ typedef struct { const char *label; const char *shift; int code; } osk_key_t;
  * Open-Apple, spacebar) span several cells by repeating the same entry across
  * adjacent columns -- the cursor visits each cell but they all emit one code. */
 static const osk_key_t qwerty_keys[VKBDX * VKBDY] = {
-   /* Row 0 -- floating RESET (single, top-left over ESC, a right-pointing
-    * triangle); rest is void so the game shows through beside it */
-   {G_RST,G_RST,OSK_SP_RESET},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},
+   /* Row 0 -- floating row, top-left over ESC: RESET (red triangle, emulator
+    * hard reset = instant ctrl-reset) and R (the real ADB Reset key, 0x7f --
+    * inert alone; CTL+R warm-resets, OA+CTL+R cold-boots, like the physical
+    * key). Rest is void so the game shows through beside them. */
+   {G_RST,G_RST,OSK_SP_RESET},{"R","R",0x7f},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},
    {"","",OSK_SP_VOID},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},
    {"","",OSK_SP_VOID},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},
    {"","",OSK_SP_VOID},{"","",OSK_SP_VOID},{"","",OSK_SP_VOID},
