@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <sys/time.h>
 
 #include "libretro.h"
 
@@ -41,6 +42,11 @@
  * kegs_init, run_16ms, the video_ functions, and the rest. defc.h pulls in
  * protos.h -> protos_base.h. */
 #include "defc.h"
+
+/* On-screen keyboard (Phase 4). Draws with the ported vice-libretro graph layer
+ * over our framebuffer; input + key emission route through the osk_host_*
+ * callbacks implemented at the bottom of this file. */
+#include "gsplus_osk.h"
 
 /* ------------------------------------------------------------------ */
 /*  libretro callbacks                                                 */
@@ -102,6 +108,14 @@ extern byte *g_bram_ptr;
 
 static Kimage  *g_lr_kimage;         /* main-window KEGS image */
 static word32  *g_lr_vbuf;           /* persistent XRGB8888 framebuffer */
+
+/* Drawing-layer globals consumed by the ported graph code (libretro-glue.h):
+ * the destination frame, its pitch (pixels), its height, and bytes-per-pixel.
+ * Repointed at g_lr_vbuf right before the OSK draws each frame. */
+unsigned char *retro_bmp;
+int            retrow;
+int            retroh;
+int            pix_bytes = 4;         /* always XRGB8888 */
 static int      g_lr_width;          /* current active width  (== pixels/line) */
 static int      g_lr_height;         /* current active height */
 static int      g_lr_kegs_inited;    /* KEGS globals can only init once/process */
@@ -1226,16 +1240,26 @@ static void RETRO_CALLCONV lr_keyboard_event(bool down, unsigned keycode,
    g_key_ring_head = next;
 }
 
+/* c025 modifier bits the OSK is holding sticky (see osk_host_modifier). The
+ * physical-keyboard path below must not stomp these: on desktop, the keys
+ * RetroArch maps to the RetroPad also arrive as keyboard events, and blindly
+ * rewriting shift/ctrl/caps from their (unshifted) modifier state would wipe
+ * an OSK sticky modifier before the tapped key is processed. */
+static word32 g_osk_mod_bits;
+
 /* Translate a RETROKMOD set into the IIgs c025 modifier register
  * (bit0 = shift, bit1 = control, bit2 = caps lock), like sdl_update_modifiers. */
 static void lr_apply_key_modifiers(uint16_t mods)
 {
    word32 c025_val = 0;
+   word32 mask = 7 & ~g_osk_mod_bits;
 
+   if (!mask)
+      return;
    if (mods & RETROKMOD_SHIFT)    c025_val |= 1;
    if (mods & RETROKMOD_CTRL)     c025_val |= 2;
    if (mods & RETROKMOD_CAPSLOCK) c025_val |= 4;
-   adb_update_c025_mask(g_lr_kimage, c025_val, 7);
+   adb_update_c025_mask(g_lr_kimage, c025_val & mask, mask);
 }
 
 /* Drain queued key events into the emulated ADB keyboard. */
@@ -1332,6 +1356,108 @@ static void lr_poll_mouse(void)
    }
 }
 
+/* ------------------------------------------------------------------ */
+/*  On-screen keyboard host glue                                       */
+/* ------------------------------------------------------------------ */
+/* Callbacks the OSK (gsplus_osk.c) calls back into: read the pad, inject an
+ * emulated ADB key (modifier keys update g_c025_val inside adb.c on their own),
+ * run a special action, and read a millisecond clock. */
+
+int osk_host_pad(unsigned retro_id)
+{
+   if (!input_state_cb)
+      return 0;
+   return input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, retro_id) ? 1 : 0;
+}
+
+void osk_host_key(int a2code, int down)
+{
+   if (!g_lr_kimage || a2code < 0)
+      return;
+   adb_physical_key_update(g_lr_kimage, a2code, 0, down ? 0 : 1);
+}
+
+/* Hold/release a sticky modifier. Two paths, both needed:
+ *
+ * 1. Send the modifier as a raw ADB key event. With autopoll off -- GS/OS
+ *    re-addresses the keyboard at boot, so g_kbd_dev_addr != g_kbd_ctl_addr
+ *    and every key goes through adb_kbd_reg0_data() -- code-to-character
+ *    translation happens inside the emulated OS's own ADB driver, from the
+ *    modifier key events it sees on the wire. A latch-only shift never reaches
+ *    it, so shifted OSK keys came out unshifted under GS/OS.
+ *
+ * 2. Set/clear the modifier's bit in the c025 latch, the way the physical
+ *    keyboard does (lr_apply_key_modifiers): the latch feeds the event-manager
+ *    modifier flags (open-apple shortcuts etc.) even when autopoll is off, and
+ *    in autopoll-off mode the key path of (1) never updates c025 itself.
+ *    Bits: shift 0x01, ctrl 0x02, caps 0x04, option 0x40, open-apple 0x80. */
+void osk_host_modifier(int a2code, int down)
+{
+   word32 bit;
+   if (!g_lr_kimage)
+      return;
+   switch (a2code)
+   {
+      case 0x38: bit = 0x01; break;   /* shift               */
+      case 0x36: bit = 0x02; break;   /* control             */
+      case 0x39: bit = 0x04; break;   /* caps lock           */
+      case 0x3a: bit = 0x40; break;   /* option / solid-apple*/
+      case 0x37: bit = 0x80; break;   /* command / open-apple*/
+      default:   return;
+   }
+   adb_physical_key_update(g_lr_kimage, a2code, 0, down ? 0 : 1);
+   if (down)
+      g_osk_mod_bits |= bit;
+   else
+      g_osk_mod_bits &= ~bit;
+   adb_update_c025_mask(g_lr_kimage, down ? bit : 0, bit);
+}
+
+void osk_host_action(int action)
+{
+   if (action == OSK_ACTION_RESET && g_lr_kegs_inited)
+      do_reset();
+}
+
+long osk_host_now_ms(void)
+{
+   struct timeval tv;
+   gettimeofday(&tv, NULL);
+   return (long)(tv.tv_sec * 1000L + tv.tv_usec / 1000L);
+}
+
+/* Select toggles the OSK on/off (edge-detected). Runs every frame regardless of
+ * OSK state so it can both open and close it. */
+static int g_osk_toggle_prev;
+
+/* Tracks OSK visibility across frames so retro_run() can force one full-frame
+ * redraw when the OSK hides, clearing its destructively-composited pixels. */
+static int g_osk_prev_visible;
+
+static void lr_poll_osk_toggle(void)
+{
+   int pressed;
+   if (!input_state_cb)
+      return;
+   pressed = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0,
+                            RETRO_DEVICE_ID_JOYPAD_SELECT) ? 1 : 0;
+   if (pressed && !g_osk_toggle_prev)
+      toggle_vkbd();
+   g_osk_toggle_prev = pressed;
+}
+
+/* Point the drawing layer at our framebuffer and confine the OSK to the visible
+ * rectangle (so Border=Crop keeps it on-screen), then composite it. */
+static void lr_draw_osk(int ox, int oy, int ow, int oh)
+{
+   retro_bmp = (unsigned char *)g_lr_vbuf;
+   retrow    = g_lr_width;    /* pitch, in pixels */
+   retroh    = g_lr_height;
+   pix_bytes = 4;
+   osk_set_area(ox, oy, ow, oh);
+   print_vkbd();
+}
+
 /* RetroArch input descriptors: label the pad buttons the core actually uses. */
 static const struct retro_input_descriptor g_input_descriptors[] = {
    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "Left (Arrow)" },
@@ -1341,6 +1467,8 @@ static const struct retro_input_descriptor g_input_descriptors[] = {
    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "Button 0 (Open-Apple)" },
    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "Button 1 (Solid-Apple)" },
    { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START, "Return" },
+   { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,
+        "On-Screen Keyboard" },
    { 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
         RETRO_DEVICE_ID_ANALOG_X, "Joystick X" },
    { 0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT,
@@ -1378,12 +1506,20 @@ void retro_run(void)
    if (input_poll_cb)
       input_poll_cb();
 
+   /* Select toggles the on-screen keyboard (works whether it's open or shut). */
+   lr_poll_osk_toggle();
+
    /* Feed queued keyboard events and current pad/mouse state to the emulated
     * ADB before advancing time, so this frame sees them. The analog paddle is
     * sampled lazily instead: joystick_update() reads live state whenever the
-    * program strobes the paddle trigger ($C070). */
+    * program strobes the paddle trigger ($C070). A physical keyboard keeps
+    * working with the OSK open, but while it's up the pad drives the OSK (and
+    * joystick_update centers the paddle) instead of the emulated keys/joystick. */
    lr_drain_keyboard();
-   lr_poll_pad_keys();
+   if (retro_vkbd)
+      input_vkbd();
+   else
+      lr_poll_pad_keys();
    lr_poll_mouse();
 
    /* Advance the emulator by exactly one VBL frame. run_16ms() folds in
@@ -1409,6 +1545,15 @@ void retro_run(void)
       lr_update_geometry();
    }
 
+   /* The OSK is alpha-composited destructively into g_lr_vbuf, which the core
+    * otherwise updates only via dirty rectangles. Force a full-frame redraw
+    * while the OSK is up (so a clean picture underlies each frame and the alpha
+    * never accumulates) and for one frame after it hides (so the last frame's
+    * baked-in OSK pixels get painted over instead of lingering). */
+   if (g_lr_kimage && (retro_vkbd || g_osk_prev_visible))
+      video_set_x_refresh_needed(g_lr_kimage, 1);
+   g_osk_prev_visible = retro_vkbd;
+
    /* Drain the core's dirty rectangles into our persistent framebuffer, then
     * hand RetroArch the visible rectangle (whole frame, or just the picture when
     * Border=Crop -- a pointer offset + smaller w/h, same full pitch). Border=
@@ -1423,6 +1568,10 @@ void retro_run(void)
       }
       if (g_opt_border == LR_BORDER_BLACK)
          lr_paint_border_black();
+      /* Composite the OSK over the finished picture (inside the visible rect),
+       * at the full buffer pitch, before handing the frame to RetroArch. */
+      if (retro_vkbd)
+         lr_draw_osk(ox, oy, ow, oh);
       video_cb(g_lr_vbuf + (size_t)oy * g_lr_width + ox, ow, oh,
                (size_t)g_lr_width * sizeof(word32));
    }
@@ -1558,6 +1707,14 @@ void joystick_update(dword64 dfcyc)
    for (i = 0; i < 4; i++)
       g_paddle_val[i] = 32767;
    g_paddle_buttons = 0xc;
+
+   /* While the OSK is up the pad drives it, not the paddle: leave the joystick
+    * centered with buttons released so nothing leaks into the emulated game. */
+   if (retro_vkbd)
+   {
+      paddle_update_trigger_dcycs(dfcyc);
+      return;
+   }
 
    if (!input_state_cb)
       return;

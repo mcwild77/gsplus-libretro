@@ -24,6 +24,8 @@ INCFLAGS += \
 
 SOURCES_C := \
 	$(LIBRETRO_DIR)/libretro.c \
+	$(LIBRETRO_DIR)/libretro-graph.c \
+	$(LIBRETRO_DIR)/gsplus_osk.c \
 	$(GSPLUS_SRC)/adb.c \
 	$(GSPLUS_SRC)/engine_c.c \
 	$(GSPLUS_SRC)/clock.c \
