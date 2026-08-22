@@ -83,7 +83,7 @@ scc_serial_unix_change_params(int port)
 
 #if 1
 	printf("baudrate: %d, iflag:%x, oflag:%x, cflag:%x, lflag:%x\n",
-		(int)termios_buf.c_ispeed, (int)termios_buf.c_iflag,
+		(int)cfgetispeed(&termios_buf), (int)termios_buf.c_iflag,
 		(int)termios_buf.c_oflag, (int)termios_buf.c_cflag,
 		(int)termios_buf.c_lflag);
 #endif
@@ -125,7 +125,7 @@ scc_serial_unix_change_params(int port)
 #endif
 
 	printf("fd: %d, baudrate: %d, iflag:%x, oflag:%x, cflag:%x, lflag:%x\n",
-		fd, (int)termios_buf.c_ispeed, (int)termios_buf.c_iflag,
+		fd, (int)cfgetispeed(&termios_buf), (int)termios_buf.c_iflag,
 		(int)termios_buf.c_oflag, (int)termios_buf.c_cflag,
 		(int)termios_buf.c_lflag);
 	ret = tcsetattr(fd, TCSANOW, &termios_buf);

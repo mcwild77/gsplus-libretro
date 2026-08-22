@@ -13,7 +13,8 @@ gsplus_screenshot_*.png
 gsplus_libretro.dylib
 gsplus_libretro.so
 gsplus_libretro.dll
-build/            # Android per-ABI cross-build trees (build/android-<abi>/)
+# Android per-ABI cross-build trees (build/android-<abi>/)
+build/
 
 # Local Claude Code tooling
 .agents/

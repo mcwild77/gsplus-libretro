@@ -26,7 +26,7 @@ void libretro_snd_init(word32 *shmaddr);
 int libretro_send_audio(byte *ptr, int size);
 #endif
 
-#if defined(__linux__) || defined(OSS)
+#if (defined(__linux__) || defined(OSS)) && !defined(LIBRETRO_AUDIO)
 # include <sys/soundcard.h>
 #endif
 
@@ -36,7 +36,9 @@ int libretro_send_audio(byte *ptr, int size);
 #endif
 #include <errno.h>
 
-#if defined(_WIN32) || defined(__CYGWIN__) || defined(MAC)
+#if defined(_WIN32) || defined(__CYGWIN__) || defined(MAC) || defined(LIBRETRO_AUDIO)
+	// Windows/mac never fork; libretro audio is pulled in-process per frame, so
+	// it never forks either (and Android's bionic has no SysV shm anyway).
 # define KEGS_CAN_FORK	0
 #else
 	// Linux, or other Unix, we may fork and run sound in the child
@@ -464,7 +466,7 @@ child_sound_loop(int read_fd, int write_fd, word32 *shm_addr)
 	g_audio_rate = g_preferred_rate;
 
 	did_init = 0;
-#if defined(__linux__) || defined(OSS)
+#if (defined(__linux__) || defined(OSS)) && !defined(LIBRETRO_AUDIO)
 	did_init = child_sound_init_linux();
 #endif
 
@@ -500,7 +502,7 @@ child_sound_loop(int read_fd, int write_fd, word32 *shm_addr)
 }
 
 
-#if defined(__linux__) || defined(OSS)
+#if (defined(__linux__) || defined(OSS)) && !defined(LIBRETRO_AUDIO)
 int
 child_sound_init_linux()
 {

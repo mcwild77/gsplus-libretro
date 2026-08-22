@@ -13,6 +13,15 @@
 #      make -f Makefile.libretro clean
 #      make -f Makefile.libretro platform=unix
 #
+#  Android (NDK cross-build; one ABI per invocation):
+#      make -f Makefile.libretro platform=android abi=arm64   # arm64-v8a
+#      make -f Makefile.libretro platform=android abi=arm     # armeabi-v7a
+#      make -f Makefile.libretro platform=android abi=x86_64
+#      make -f Makefile.libretro platform=android abi=x86
+#  The NDK is found via NDK_ROOT / ANDROID_NDK_ROOT / ANDROID_NDK_HOME, else
+#  auto-detected under the standard SDK location. Each ABI builds into its own
+#  build/android-<abi>/ tree, so ABIs and the native build never collide.
+#
 #  Layout follows the libretro buildbot convention: this file owns platform +
 #  flag selection; Makefile.common owns the source/include list.
 # ----------------------------------------------------------------------------
@@ -54,6 +63,59 @@ else ifeq ($(platform), win)
    TARGET := $(TARGET_NAME)_libretro.dll
    SHARED := -shared -static-libgcc -Wl,--version-script=$(LINK_T) -Wl,--no-undefined
    LIBS   += -lws2_32 -lwinmm
+else ifeq ($(platform), android)
+   # ------------------------------------------------------------------------
+   #  Android cross-build via the NDK's prebuilt clang. One ABI per invocation,
+   #  selected with abi=arm64 (default) | arm | x86_64 | x86; min API level with
+   #  android_api=21 (default). Objects and the output .so live under
+   #  build/android-<abi>/ so they never clobber the native build's objects
+   #  (which share the source tree). Drop the .so into a RetroArch Android
+   #  install's cores dir, or repackage into the APK's lib/<abi>/.
+   # ------------------------------------------------------------------------
+   abi ?= arm64
+   android_api ?= 21
+
+   # Locate the NDK: explicit var wins, else the standard SDK layout (newest).
+   NDK_ROOT ?= $(ANDROID_NDK_ROOT)
+   ifeq ($(NDK_ROOT),)
+      NDK_ROOT := $(ANDROID_NDK_HOME)
+   endif
+   ifeq ($(NDK_ROOT),)
+      NDK_ROOT := $(lastword $(sort $(wildcard \
+         $(HOME)/Library/Android/ndk/* \
+         $(HOME)/Library/Android/sdk/ndk/* \
+         $(HOME)/Android/Sdk/ndk/*)))
+   endif
+   ifeq ($(NDK_ROOT),)
+      $(error Android build: no NDK found; set NDK_ROOT=/path/to/android-ndk)
+   endif
+
+   # Prebuilt toolchain host tag.
+   ifneq ($(findstring Darwin,$(shell uname -s)),)
+      NDK_HOST := darwin-x86_64
+   else
+      NDK_HOST := linux-x86_64
+   endif
+   NDK_BIN := $(NDK_ROOT)/toolchains/llvm/prebuilt/$(NDK_HOST)/bin
+
+   # ABI -> clang target triple.
+   ifeq ($(abi), arm64)
+      ANDROID_TRIPLE := aarch64-linux-android
+   else ifeq ($(abi), arm)
+      ANDROID_TRIPLE := armv7a-linux-androideabi
+   else ifeq ($(abi), x86_64)
+      ANDROID_TRIPLE := x86_64-linux-android
+   else ifeq ($(abi), x86)
+      ANDROID_TRIPLE := i686-linux-android
+   else
+      $(error Android build: unknown abi '$(abi)' (use arm64|arm|x86_64|x86))
+   endif
+
+   CC     := $(NDK_BIN)/$(ANDROID_TRIPLE)$(android_api)-clang
+   OBJDIR := $(CORE_DIR)/build/android-$(abi)
+   TARGET := $(OBJDIR)/$(TARGET_NAME)_libretro_android.so
+   SHARED := -shared -Wl,--version-script=$(LINK_T) -Wl,--no-undefined
+   LIBS   += -lm
 else
    # unix (Linux / *BSD)
    TARGET := $(TARGET_NAME)_libretro.so
@@ -85,7 +147,14 @@ include $(CORE_DIR)/Makefile.common
 
 CFLAGS += $(OPTFLAGS) -Wall $(fpic) $(DEFINES) $(INCFLAGS)
 
-OBJECTS := $(SOURCES_C:.c=.o)
+# Native builds compile objects next to their sources; the Android cross-build
+# redirects them under build/android-<abi>/ (OBJDIR) so ABIs and the host build
+# never share object files.
+ifeq ($(OBJDIR),)
+   OBJECTS := $(SOURCES_C:.c=.o)
+else
+   OBJECTS := $(addprefix $(OBJDIR)/,$(SOURCES_C:.c=.o))
+endif
 
 # ----------------------------------------------------------------------------
 #  Rules
@@ -95,10 +164,16 @@ all: $(TARGET)
 $(TARGET): $(OBJECTS)
 	$(CC) $(fpic) $(SHARED) -o $@ $(OBJECTS) $(LIBS)
 
+$(OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJECTS) $(TARGET)
+	rm -f $(SOURCES_C:.c=.o) $(TARGET_NAME)_libretro.dylib \
+		$(TARGET_NAME)_libretro.so $(TARGET_NAME)_libretro.dll
+	rm -rf $(CORE_DIR)/build
 
 .PHONY: all clean
