@@ -66,6 +66,7 @@ extern int g_swap_paddles;
 extern int g_invert_paddles;
 extern int g_voc_enable;
 extern int g_status_enable;
+extern int g_video_center_a2;
 extern int g_mainwin_width;
 extern int g_mainwin_height;
 extern int g_mainwin_xpos;
@@ -171,7 +172,8 @@ int	g_nohwaccel = 0;	/* force the software renderer */
 int	g_scanline_simulator = 0; /* CRT scanline overlay intensity, 0-100 (0=off) */
 int	g_crt = 0;		/* curved CRT effect (curvature+mask+glow+vignette) */
 int	g_crt_curve = 2;	/* CRT screen curvature amount, 0-100 (0=flat) */
-int	g_crt_mask = 5;	/* CRT phosphor-mask strength, 0-100 (0=off, subtle) */
+int	g_crt_mask = 2;	/* CRT phosphor-mask strength, 0-100 (0=off, subtle) */
+int	g_crt_glow = 8;	/* CRT glow/bloom strength, 0-100 (0=off) */
 int	g_crt_vignette = 5;	/* CRT corner darkening, 0-100 (0=off, flat brightness) */
 int	g_hblur = 0;		/* horizontal linear blur, 0-100 (0=off, sharp) */
 int	g_vblur = 0;		/* vertical linear blur, 0-100 (0=off, sharp) */
@@ -395,10 +397,13 @@ Cfg_menu g_cfg_sdl_video_menu[] = {
 { "Ignore Aspect Ratio (restart required),0,No,1,Yes", &g_noaspect, "noaspect", 0, CFGTYPE_INT },
 { "High DPI (restart required),0,No,1,Yes", &g_highdpi, "highdpi", 0, CFGTYPE_INT },
 { "Force Software Renderer (restart required),0,No,1,Yes", &g_nohwaccel, "nohwaccel", 0, CFGTYPE_INT },
+{ "Center 8-bit Video Modes,0,No (KEGS left-align),1,Yes",
+			&g_video_center_a2, "centera2", 0, CFGTYPE_INT },
 { "Scanline Simulator 0-100", &g_scanline_simulator, "scanline", 0, CFGTYPE_INT },
 { "CRT Effect (curve+mask+glow),0,Off,1,On", &g_crt, "crt", 0, CFGTYPE_INT },
 { "CRT Curvature 0-100", &g_crt_curve, "crtcurve", 0, CFGTYPE_INT },
 { "CRT Phosphor Mask 0-100", &g_crt_mask, "crtmask", 0, CFGTYPE_INT },
+{ "CRT Glow 0-100", &g_crt_glow, "crtglow", 0, CFGTYPE_INT },
 { "CRT Vignette 0-100", &g_crt_vignette, "crtvignette", 0, CFGTYPE_INT },
 { "Horizontal Blur 0-100", &g_hblur, "hblur", 0, CFGTYPE_INT },
 { "Vertical Blur 0-100", &g_vblur, "vblur", 0, CFGTYPE_INT },
@@ -577,6 +582,31 @@ int	g_menu_redraw_needed = 1;
 
 int g_cfg_argv_num_overrides = 0;
 char *g_cfg_argv_overrides[MAX_CFG_ARGV_OVERRIDES];
+
+/* Print the GSplus display-effect config variables as CLI flags, for
+ *  print_usage().  Driven by the menu table so the help text can't drift
+ *  from the actual options: every entry with a config-file name is listed,
+ *  using its menu label (the part of str before the value list). */
+void
+cfg_print_cli_flags()
+{
+	Cfg_menu *menuptr;
+	const char *str;
+	int	i, len;
+
+	menuptr = &g_cfg_sdl_video_menu[0];
+	for(i = 0; menuptr[i].str != 0; i++) {
+		if(!menuptr[i].name_str) {
+			continue;	/* menu title, separator or Back row */
+		}
+		str = menuptr[i].str;
+		len = 0;
+		while(str[len] && (str[len] != ',')) {
+			len++;
+		}
+		printf("  -%-14s  %.*s\n", menuptr[i].name_str, len, str);
+	}
+}
 
 int
 config_add_argv_override(const char *str1, const char *str2)
@@ -1158,10 +1188,11 @@ cfg_int_update(int *iptr, int new_val)
 
 	old_val = *iptr;
 	if((iptr == &g_scanline_simulator) || (iptr == &g_crt_curve) ||
-				(iptr == &g_crt_mask) || (iptr == &g_crt_vignette) ||
+				(iptr == &g_crt_mask) || (iptr == &g_crt_glow) ||
+				(iptr == &g_crt_vignette) ||
 				(iptr == &g_hblur) || (iptr == &g_vblur)) {
 		// Scanline intensity, CRT curvature, phosphor-mask strength,
-		// vignette and horizontal/vertical blur are
+		// glow, vignette and horizontal/vertical blur are
 		// 0-100 percentages (0=off/flat, 100=max). Clamp here so they can't
 		// go negative or above 100 from any path: typed edits, +/- arrows,
 		// or a hand-edited config file.

@@ -25,3 +25,5 @@ CLAUDE.local.md
 # Editor
 .vscode/
 
+# Absolute trash
+.DS_Store
