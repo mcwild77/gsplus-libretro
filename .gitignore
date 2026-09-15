@@ -22,3 +22,6 @@ skills-lock.json
 claudedocs/
 CLAUDE.local.md
 
+# Editor
+.vscode/
+
